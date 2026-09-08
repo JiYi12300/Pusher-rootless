@@ -153,25 +153,35 @@ static NSString* retryKeyForBulletinAndService(BBBulletin* bulletin,
                       [httpMethod caseInsensitiveCompare:@"HEAD"] ==
                           NSOrderedSame);
   if (isGetOrHead) {
-    // Use NSURLComponents + NSURLQueryItem instead of manual string
-    // concatenation: it percent-encodes both names and values, preserves any
-    // existing query string, and correctly handles '?', '&', and '#'.
-    NSURLComponents* components =
-        [NSURLComponents componentsWithString:newUrlString];
-    if (components) {
-      NSMutableArray* queryItems =
-          [NSMutableArray arrayWithArray:components.queryItems ?: @[]];
-      for (NSString* key in infoDictForRequest.allKeys) {
-        // GET/HEAD URLs can't carry non-string values (NSNumber, the image
-        // marker @YES, etc.) as-is; stringify them so they survive in the
-        // query.
-        [queryItems addObject:[NSURLQueryItem queryItemWithName:key
-                                                          value:NSPushStringForValue(
-                                                                    infoDictForRequest
-                                                                        [key])]];
+    if (pushRequest.rawBodyString.length > 0) {
+      // Pre-rendered query string: append verbatim. Placeholder values were
+      // already percent-encoded by the service; template text stays as-is.
+      NSString* separator = [newUrlString containsString:@"?"] ? @"&" : @"?";
+      newUrlString = [newUrlString
+          stringByAppendingString:[separator
+                                     stringByAppendingString:pushRequest
+                                                          .rawBodyString]];
+    } else {
+      // Use NSURLComponents + NSURLQueryItem instead of manual string
+      // concatenation: it percent-encodes both names and values, preserves any
+      // existing query string, and correctly handles '?', '&', and '#'.
+      NSURLComponents* components =
+          [NSURLComponents componentsWithString:newUrlString];
+      if (components) {
+        NSMutableArray* queryItems =
+            [NSMutableArray arrayWithArray:components.queryItems ?: @[]];
+        for (NSString* key in infoDictForRequest.allKeys) {
+          // GET/HEAD URLs can't carry non-string values (NSNumber, the image
+          // marker @YES, etc.) as-is; stringify them so they survive in the
+          // query.
+          [queryItems addObject:[NSURLQueryItem queryItemWithName:key
+                                                            value:NSPushStringForValue(
+                                                                      infoDictForRequest
+                                                                          [key])]];
+        }
+        components.queryItems = queryItems;
+        newUrlString = components.string;
       }
-      components.queryItems = queryItems;
-      newUrlString = components.string;
     }
     XLog(@"URL String: %@", newUrlString);
   }
@@ -212,48 +222,68 @@ static NSString* retryKeyForBulletinAndService(BBBulletin* bulletin,
     [NSPushLog addToLogIfEnabledForService:service
                                   bulletin:bulletin
                                      label:@"Header"
-                                    object:XStr(@"%@: %@", headerName,
-                                                headerValue)];
+                                  object:XStr(@"%@: %@", headerName,
+                                              headerValue)];
   }
 
   if (!isGetOrHead) {
-    // Services provide a sanitized log body via logInfoDict. The sender only
-    // logs what the service gave it and does not rewrite request bodies.
-    NSDictionary* infoDictForLog = pushRequest.logInfoDict ?: infoDictForRequest;
-    [NSPushLog addToLogIfEnabledForService:service
-                                  bulletin:bulletin
-                                     label:@"Request Body Dictionary"
-                                    object:infoDictForLog];
-
-    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-
     NSData* requestData = nil;
     BOOL isFormBody = pushRequest.bodyType.length > 0 &&
                       [pushRequest.bodyType caseInsensitiveCompare:@"form"] ==
                           NSOrderedSame;
-    if (isFormBody) {
-      NSString* formString =
-          NSPushFormEncodedStringFromDictionary(infoDictForRequest);
-      requestData = [formString dataUsingEncoding:NSUTF8StringEncoding];
-      [request setValue:@"application/x-www-form-urlencoded; charset=utf-8"
-          forHTTPHeaderField:@"Content-Type"];
-    } else {
-      [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-      NSError* jsonError = nil;
+    if (pushRequest.rawBodyString.length > 0) {
+      // Pre-rendered body: send the string verbatim. The service already
+      // escaped/encoded placeholder values according to bodyType.
+      [NSPushLog addToLogIfEnabledForService:service
+                                    bulletin:bulletin
+                                       label:@"Request Body"
+                                      object:pushRequest.rawBodyString];
       requestData =
-          [NSJSONSerialization dataWithJSONObject:infoDictForRequest
-                                          options:NSJSONWritingPrettyPrinted
-                                            error:&jsonError];
-      if (!requestData) {
-        XLog(@"%@ JSON serialization failed: %@", logString, jsonError);
-        [NSPushLog addToLogIfEnabledForService:service
-                                      bulletin:bulletin
-                                         label:@"JSON Serialization Error"
-                                        object:jsonError.description
-                                  dontTruncate:YES];
-        [self setRetriesLeft:nil
-                 forRetryKey:retryKeyForBulletinAndService(bulletin, service)];
-        return;
+          [pushRequest.rawBodyString dataUsingEncoding:NSUTF8StringEncoding];
+      if (isFormBody) {
+        [request setValue:@"application/x-www-form-urlencoded; charset=utf-8"
+            forHTTPHeaderField:@"Content-Type"];
+      } else {
+        [request setValue:@"application/json"
+            forHTTPHeaderField:@"Content-Type"];
+      }
+    } else {
+      // Services provide a sanitized log body via logInfoDict. The sender only
+      // logs what the service gave it and does not rewrite request bodies.
+      NSDictionary* infoDictForLog =
+          pushRequest.logInfoDict ?: infoDictForRequest;
+      [NSPushLog addToLogIfEnabledForService:service
+                                    bulletin:bulletin
+                                       label:@"Request Body Dictionary"
+                                      object:infoDictForLog];
+
+      [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+
+      if (isFormBody) {
+        NSString* formString =
+            NSPushFormEncodedStringFromDictionary(infoDictForRequest);
+        requestData = [formString dataUsingEncoding:NSUTF8StringEncoding];
+        [request setValue:@"application/x-www-form-urlencoded; charset=utf-8"
+            forHTTPHeaderField:@"Content-Type"];
+      } else {
+        [request setValue:@"application/json"
+            forHTTPHeaderField:@"Content-Type"];
+        NSError* jsonError = nil;
+        requestData =
+            [NSJSONSerialization dataWithJSONObject:infoDictForRequest
+                                            options:NSJSONWritingPrettyPrinted
+                                              error:&jsonError];
+        if (!requestData) {
+          XLog(@"%@ JSON serialization failed: %@", logString, jsonError);
+          [NSPushLog addToLogIfEnabledForService:service
+                                        bulletin:bulletin
+                                           label:@"JSON Serialization Error"
+                                          object:jsonError.description
+                                    dontTruncate:YES];
+          [self setRetriesLeft:nil
+                   forRetryKey:retryKeyForBulletinAndService(bulletin, service)];
+          return;
+        }
       }
     }
     [request setValue:XStr(@"%d", (int)requestData.length)
@@ -458,6 +488,7 @@ static NSString* retryKeyForBulletinAndService(BBBulletin* bulletin,
                                          infoDict:retryInfoDict
                                            method:pushRequest.method];
           retryRequest.bodyType = pushRequest.bodyType;
+          retryRequest.rawBodyString = pushRequest.rawBodyString;
           retryRequest.logInfoDict = pushRequest.logInfoDict;
           retryRequest.resendHandler = pushRequest.resendHandler;
           retryRequest.resendCount = pushRequest.resendCount;
@@ -542,6 +573,7 @@ static NSString* retryKeyForBulletinAndService(BBBulletin* bulletin,
                                          infoDict:retryInfoDict
                                            method:pushRequest.method];
           retryRequest.bodyType = pushRequest.bodyType;
+          retryRequest.rawBodyString = pushRequest.rawBodyString;
           retryRequest.logInfoDict = pushRequest.logInfoDict;
           retryRequest.resendHandler = pushRequest.resendHandler;
           retryRequest.resendCount = pushRequest.resendCount;
