@@ -34,6 +34,12 @@ typedef void (^NSPushRequestResendHandler)(NSPushRequest* request,
 // @"form" (application/x-www-form-urlencoded). GET/HEAD ignore this and put
 // infoDict in the query string instead.
 @property(nonatomic, copy) NSString* bodyType;
+// Optional pre-rendered request body / query string. When non-empty, the
+// sender uses this string verbatim instead of encoding infoDict: non-GET/HEAD
+// methods send it as the HTTP body (Content-Type follows bodyType), GET/HEAD
+// append it to the URL as the query string. Services that fully control the
+// payload format themselves (e.g. HTTP's params template) set this.
+@property(nonatomic, copy) NSString* rawBodyString;
 // Optional service-controlled resend hook. See NSPushRequestResendHandler.
 @property(nonatomic, copy) NSPushRequestResendHandler resendHandler;
 // Number of times this request has already been resent through resendHandler.

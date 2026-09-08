@@ -13,7 +13,12 @@
                                    infoDict:(NSDictionary*)infoDict
                                     cacheKey:(NSString*)cacheKey
                                      corpid:(NSString*)corpid
-                                   corpsecret:(NSString*)corpsecret;
+                                 corpsecret:(NSString*)corpsecret;
++ (NSPushRequest*)webhookPushRequestWithKey:(NSString*)webhookKey
+                                   infoDict:(NSDictionary*)infoDict;
++ (void)botWebhookRequestForBulletinContext:(NSPBulletinContext*)context
+                                     config:(NSPushServiceConfig*)config
+                                 completion:(void (^)(NSPushRequest*))completion;
 @end
 
 @implementation NSPWechatService
@@ -40,18 +45,40 @@
         XStrDefault(servicePrefs[NSPPreferenceServiceCorpsecretKey], @""),
     @"agentID" : @(NSPushIntegerValue(
         servicePrefs[NSPPreferenceServiceAgentIDKey], 0)),
-    @"touser" : XStrDefault(servicePrefs[NSPPreferenceServiceTouserKey], @"")
+    @"touser" : XStrDefault(servicePrefs[NSPPreferenceServiceTouserKey], @""),
+    @"pushMode" : @(NSPushIntegerValue(servicePrefs[@"pushMode"],
+                                      PUSHER_WECHAT_PUSH_MODE_APP)),
+    @"webhookKey" : XStrDefault(servicePrefs[@"webhookKey"], @""),
+    @"botMsgType" : XStrDefault(servicePrefs[@"botMsgType"], @"text")
   };
 }
 
 + (NSDictionary*)extraCustomAppPrefsForName:(NSString*)name
                                    appPrefs:(NSDictionary*)appPrefs {
-  return @{@"touser" : XStrDefault(appPrefs[@"touser"], @"")};
+  NSMutableDictionary* prefs = [NSMutableDictionary
+      dictionaryWithDictionary:@{@"touser" : XStrDefault(appPrefs[@"touser"], @"")}];
+  // Only override the service-level webhookKey when the per-app override
+  // actually configures one, so adding an app to App Customization (e.g. just
+  // for device/sound filters) doesn't silently blank the bot key.
+  NSString* webhookKey = XStrDefault(appPrefs[@"webhookKey"], @"");
+  if (webhookKey.length > 0) {
+    prefs[@"webhookKey"] = webhookKey;
+  }
+  return prefs;
 }
 
 + (void)requestForBulletinContext:(NSPBulletinContext*)context
                            config:(NSPushServiceConfig*)config
                        completion:(void (^)(NSPushRequest* request))completion {
+  NSInteger pushMode = NSPushIntegerValue(config.rawPrefs[@"pushMode"],
+                                          PUSHER_WECHAT_PUSH_MODE_APP);
+  if (pushMode == PUSHER_WECHAT_PUSH_MODE_BOT) {
+    [self botWebhookRequestForBulletinContext:context
+                                       config:config
+                                   completion:completion];
+    return;
+  }
+
   NSString* touser = XStrDefault(config.rawPrefs[@"touser"], @"");
   // agentid and safe must be integers for the WeChat Work message/send API.
   // Use the guarded accessor so malformed prefs can't crash the send path.
@@ -118,6 +145,102 @@
         completion(request);
       }
     }];
+}
+
+// Group bot webhook: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY
+// No access_token is needed; the key in the URL authorizes the send. Supports
+// text and markdown message types.
++ (void)botWebhookRequestForBulletinContext:(NSPBulletinContext*)context
+                                     config:(NSPushServiceConfig*)config
+                                 completion:(void (^)(NSPushRequest*))completion {
+  if (!completion) {
+    return;
+  }
+
+  NSString* webhookKey = XStrDefault(config.rawPrefs[@"webhookKey"], @"");
+  if (webhookKey.length == 0) {
+    // No key configured: abort rather than firing a request that is
+    // guaranteed to fail server-side.
+    completion(nil);
+    return;
+  }
+
+  NSString* title = context.title ?: @"";
+  NSString* message = context.message ?: @"";
+  // markdown bot messages render better with a bolded title; text bots are
+  // plain content either way.
+  NSString* botMsgType = XStrDefault(config.rawPrefs[@"botMsgType"], @"text");
+  BOOL isMarkdown = [botMsgType isEqualToString:@"markdown"];
+  NSString* content = nil;
+  if (isMarkdown) {
+    content = XStr(@"**%@**\n%@", title, message);
+  } else {
+    content = XStr(@"%@\n%@", title, message);
+  }
+
+  NSDictionary* infoDict = nil;
+  if (isMarkdown) {
+    infoDict = @{@"msgtype" : @"markdown", @"markdown" : @{@"content" : content}};
+  } else {
+    infoDict = @{@"msgtype" : @"text", @"text" : @{@"content" : content}};
+  }
+
+  completion([self webhookPushRequestWithKey:webhookKey infoDict:infoDict]);
+}
+
++ (NSPushRequest*)webhookPushRequestWithKey:(NSString*)webhookKey
+                                   infoDict:(NSDictionary*)infoDict {
+  NSCharacterSet* allowed = [NSCharacterSet
+      characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+                                     @"klmnopqrstuvwxyz0123456789-._~"];
+  NSString* encodedKey = [(webhookKey ?: @"")
+      stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+  NSPushRequest* request =
+      [NSPushRequest requestWithURLString:[[PUSHER_SERVICE_WECHAT_WEBHOOK_URL
+          stringByReplacingOccurrencesOfString:@"REPLACE_KEY"
+                                    withString:encodedKey] copy]
+                       headers:nil
+                      infoDict:infoDict];
+  request.logInfoDict = [self logInfoDictForInfoDict:infoDict];
+
+  // The webhook API also reports errors through a numeric errcode in a 200
+  // response (e.g. 93000 for an invalid key). Surface those as failures
+  // instead of letting the sender's generic "HTTP 200 = success" path log
+  // them as delivered. There is no token to refresh here, so no resend.
+  request.resendHandler =
+      ^(NSPushRequest* request, NSURLResponse* response, NSData* data,
+        NSError* error,
+        void (^completion)(NSPushRequest* request, BOOL shouldFail)) {
+    if (error || !data) {
+      completion(nil, NO);
+      return;
+    }
+    id json = [NSJSONSerialization JSONObjectWithData:data
+                                              options:0
+                                                error:nil];
+    if (![json isKindOfClass:NSDictionary.class]) {
+      request.failureReason = @"WeChat webhook returned an invalid/non-JSON response";
+      completion(nil, YES);
+      return;
+    }
+    id errcodeValue = json[@"errcode"];
+    if (![errcodeValue respondsToSelector:@selector(integerValue)]) {
+      request.failureReason =
+          @"WeChat webhook returned a response without a valid errcode";
+      completion(nil, YES);
+      return;
+    }
+    NSInteger errcode = [errcodeValue integerValue];
+    if (errcode != 0) {
+      NSString* errmsg = XStrDefault(json[@"errmsg"], @"");
+      request.failureReason = XStr(@"WeChat webhook send failed (errcode=%ld, errmsg=%@)",
+                                   (long)errcode, errmsg);
+      completion(nil, YES);
+      return;
+    }
+    completion(nil, NO);
+  };
+  return request;
 }
 
 + (void)fetchAccessTokenWithCorpid:(NSString*)corpid
@@ -193,7 +316,7 @@
   NSMutableArray* queryItems = [NSMutableArray array];
   NSCharacterSet* allowed = [NSCharacterSet
       characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
-                                         @"klmnopqrstuvwxyz0123456789-._~"];
+                                     @"klmnopqrstuvwxyz0123456789-._~"];
   for (NSString* key in params) {
     NSString* encoded = [(NSString*)params[key]
         stringByAddingPercentEncodingWithAllowedCharacters:allowed];
@@ -270,10 +393,10 @@
                                    infoDict:(NSDictionary*)infoDict
                                     cacheKey:(NSString*)cacheKey
                                      corpid:(NSString*)corpid
-                                   corpsecret:(NSString*)corpsecret {
+                                 corpsecret:(NSString*)corpsecret {
   NSCharacterSet* allowed = [NSCharacterSet
       characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
-                                         @"klmnopqrstuvwxyz0123456789-._~"];
+                                     @"klmnopqrstuvwxyz0123456789-._~"];
   NSString* encodedToken = [(token ?: @"")
       stringByAddingPercentEncodingWithAllowedCharacters:allowed];
   NSPushRequest* request = [NSPushRequest
