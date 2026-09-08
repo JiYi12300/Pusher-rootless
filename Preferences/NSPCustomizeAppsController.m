@@ -35,10 +35,12 @@
       defaultDict[@"eventName"] = _defaultEventName;
     }
     if (_isCustomService || XEq(_service, PUSHER_SERVICE_IFTTT) ||
-        XEq(_service, PUSHER_SERVICE_PUSHER_RECEIVER)) {
+        XEq(_service, PUSHER_SERVICE_PUSHER_RECEIVER) ||
+        XEq(_service, PUSHER_SERVICE_HTTP)) {
       defaultDict[@"includeIcon"] = _defaultIncludeIcon;
     }
-    if (_isCustomService || XEq(_service, PUSHER_SERVICE_PUSHER_RECEIVER)) {
+    if (_isCustomService || XEq(_service, PUSHER_SERVICE_PUSHER_RECEIVER) ||
+        XEq(_service, PUSHER_SERVICE_HTTP)) {
       defaultDict[@"includeImage"] = _defaultIncludeImage;
       defaultDict[@"imageMaxWidth"] = _defaultImageMaxWidth;
       defaultDict[@"imageMaxHeight"] = _defaultImageMaxHeight;
@@ -157,7 +159,7 @@
   }
 
   NSString* specifierName = self.specifier.name;
-  NSRange chineseParenRange = [specifierName rangeOfString:@"（"];
+  NSRange chineseParenRange = [specifierName rangeOfString:@"\uFF08"];
   NSRange englishParenRange = [specifierName rangeOfString:@" ("];
   NSRange parenRange = chineseParenRange.location != NSNotFound
                            ? chineseParenRange
@@ -201,6 +203,24 @@
     _defaultIncludeImage = [(serviceDefaults[[self.specifier
                                  propertyForKey:@"defaultIncludeImageKey"]]
                                  ?: @YES) copy];
+    _defaultImageMaxWidth = [(serviceDefaults[[self.specifier
+                                  propertyForKey:@"defaultImageMaxWidthKey"]]
+                                  ?: @(PUSHER_DEFAULT_MAX_WIDTH)) copy];
+    _defaultImageMaxHeight = [(serviceDefaults[[self.specifier
+                                   propertyForKey:@"defaultImageMaxHeightKey"]]
+                                   ?: @(PUSHER_DEFAULT_MAX_HEIGHT)) copy];
+    _defaultImageShrinkFactor =
+        [(serviceDefaults[
+              [self.specifier propertyForKey:@"defaultImageShrinkFactorKey"]]
+              ?: @(PUSHER_DEFAULT_SHRINK_FACTOR)) copy];
+  }
+  if (XEq(_service, PUSHER_SERVICE_HTTP)) {
+    _defaultIncludeIcon = [(serviceDefaults[[self.specifier
+                                propertyForKey:@"defaultIncludeIconKey"]]
+                                ?: @NO) copy];
+    _defaultIncludeImage = [(serviceDefaults[[self.specifier
+                                 propertyForKey:@"defaultIncludeImageKey"]]
+                                 ?: @NO) copy];
     _defaultImageMaxWidth = [(serviceDefaults[[self.specifier
                                   propertyForKey:@"defaultImageMaxWidthKey"]]
                                   ?: @(PUSHER_DEFAULT_MAX_WIDTH)) copy];
@@ -461,7 +481,7 @@
 //                    // experience is TOP priority!11!!!1)
 //                    [CATransaction begin];
 //                    [table beginUpdates];
-//                    if (((NSArray *)_data[_sections[indexPath.section]]).count
+//                    if (((NSArray *)_data[_sections[indexPath.section]].count)
 //                    ==
 //                        0) {
 //                      [CATransaction setCompletionBlock:^{
