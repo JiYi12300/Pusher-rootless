@@ -25,11 +25,31 @@
   [touser setProperty:PUSHER_SERVICE_WECHAT forKey:@"service"];
   [touser setProperty:@"touser" forKey:@"customAppsPrefsKey"];
 
+  // Per-app bot webhook key override: when left empty the app inherits the
+  // service-level key, so an override added just for filters doesn't break
+  // webhook pushes.
+  PSSpecifier* webhookKey = [PSSpecifier
+      preferenceSpecifierNamed:NSPLocalizedString(@"Webhook Key", nil)
+                        target:self
+                           set:@selector(setPreferenceValue:
+                                         forBuiltInServiceSpecifier:)
+                           get:@selector(readBuiltInServicePreferenceValue:)
+                        detail:nil
+                          cell:PSEditTextCell
+                          edit:nil];
+  [webhookKey setProperty:@"webhookKey" forKey:@"key"];
+  [webhookKey setProperty:@YES forKey:@"enabled"];
+  [webhookKey setProperty:@YES forKey:@"noAutoCorrect"];
+  [webhookKey setProperty:@(isCustomApp) forKey:@"isCustomApp"];
+  [webhookKey setProperty:PUSHER_SERVICE_WECHAT forKey:@"service"];
+  [webhookKey setProperty:@"webhookKey" forKey:@"customAppsPrefsKey"];
+
   if (isCustomApp) {
     [touser setProperty:appID forKey:@"customAppID"];
+    [webhookKey setProperty:appID forKey:@"customAppID"];
   }
 
-  return @[ touser ];
+  return @[ touser, webhookKey ];
 }
 
 + (void)load {
